@@ -13,12 +13,34 @@ How to upgrade the above dependencies
 Jemalloc
 ---
 
-Jemalloc is unmodified. We only change settings via the `configure` script of Jemalloc using the `--with-lg-quantum` option, setting it to the value of 3 instead of 4. This provides us with more size classes that better suit the Redis data structures, in order to gain memory efficiency.
-
-So in order to upgrade jemalloc:
+Jemalloc is modified with changes that allow us to implement the Redis
+active defragmentation logic. However this feature of Redis is not mandatory
+and Redis is able to understand if the Jemalloc version it is compiled
+against supports such Redis-specific modifications. So in theory, if you
+are not interested in the active defragmentation, you can replace Jemalloc
+just following tose steps:
 
 1. Remove the jemalloc directory.
 2. Substitute it with the new jemalloc source tree.
+3. Edit the Makefile localted in the same directoy as the README you are
+   reading, and change the --with-version in the Jemalloc configure script
+   options with the version you are using. This is required because otherwise
+   Jemalloc configuration script is broken and will not work nested in another
+   git repository.
+
+However note that we change Jemalloc settings via the `configure` script of Jemalloc using the `--with-lg-quantum` option, setting it to the value of 3 instead of 4. This provides us with more size classes that better suit the Redis data structures, in order to gain memory efficiency.
+
+If you want to upgrade Jemalloc while also providing support for
+active defragmentation, in addition to the above steps you need to perform
+the following additional steps:
+
+5. In Jemalloc three, file `include/jemalloc/jemalloc_macros.h.in`, make sure
+   to add `#define JEMALLOC_FRAG_HINT`.
+6. Implement the function `je_get_defrag_hint()` inside `src/jemalloc.c`. You
+   can see how it is implemented in the current Jemalloc source tree shipped
+   with Redis, and rewrite it according to the new Jemalloc internals, if they
+   changed, otherwise you could just copy the old implementation if you are
+   upgrading just to a similar version of Jemalloc.
 
 Geohash
 ---

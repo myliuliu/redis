@@ -122,7 +122,7 @@ void freeReplicationBacklog(void) {
 /* Add data to the replication backlog.
  * This function also increments the global replication offset stored at
  * server.master_repl_offset, because there is no case where we want to feed
- * the backlog without incrementing the buffer. */
+ * the backlog without incrementing the offset. */
 void feedReplicationBacklog(void *ptr, size_t len) {
     unsigned char *p = ptr;
 
@@ -569,18 +569,19 @@ int startBgsaveForReplication(int mincapa) {
     serverLog(LL_NOTICE,"Starting BGSAVE for SYNC with target: %s",
         socket_target ? "slaves sockets" : "disk");
 
-    rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
-    /* If we are saving for a chained slave (that is, if we are,
-     * in turn, a slave of another instance), make sure after
-     * loadig the RDB, our slaves select the right DB: we'll just
-     * send the replication stream we receive from our master, so
-     * no way to send SELECT commands. */
-    if (server.master) rsi.repl_stream_db = server.master->db->id;
-
-    if (socket_target)
-        retval = rdbSaveToSlavesSockets(&rsi);
-    else
-        retval = rdbSaveBackground(server.rdb_filename,&rsi);
+    rdbSaveInfo rsi, *rsiptr;
+    rsiptr = rdbPopulateSaveInfo(&rsi);
+    /* Only do rdbSave* when rsiptr is not NULL,
+     * otherwise slave will miss repl-stream-db. */
+    if (rsiptr) {
+        if (socket_target)
+            retval = rdbSaveToSlavesSockets(rsiptr);
+        else
+            retval = rdbSaveBackground(server.rdb_filename,rsiptr);
+    } else {
+        serverLog(LL_WARNING,"BGSAVE for replication: replication information not available, can't generate the RDB file right now. Try later.");
+        retval = C_ERR;
+    }
 
     /* If we failed to BGSAVE, remove the slaves waiting for a full
      * resynchorinization from the list of salves, inform them with
@@ -1078,6 +1079,7 @@ void replicationCreateMasterClient(int fd, int dbid) {
     server.master->flags |= CLIENT_MASTER;
     server.master->authenticated = 1;
     server.master->reploff = server.master_initial_offset;
+    server.master->read_reploff = server.master->reploff;
     memcpy(server.master->replid, server.master_replid,
         sizeof(server.master_replid));
     /* If master offset is set to -1, this master is old and is not
@@ -1103,7 +1105,7 @@ void restartAOF() {
 #define REPL_MAX_WRITTEN_BEFORE_FSYNC (1024*1024*8) /* 8 MB */
 void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask) {
     char buf[4096];
-    ssize_t nread, readlen;
+    ssize_t nread, readlen, nwritten;
     off_t left;
     UNUSED(el);
     UNUSED(privdata);
@@ -1204,8 +1206,9 @@ void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
 
     server.repl_transfer_lastio = server.unixtime;
-    if (write(server.repl_transfer_fd,buf,nread) != nread) {
-        serverLog(LL_WARNING,"Write error or short write writing to the DB dump file needed for MASTER <-> SLAVE synchronization: %s", strerror(errno));
+    if ((nwritten = write(server.repl_transfer_fd,buf,nread)) != nread) {
+        serverLog(LL_WARNING,"Write error or short write writing to the DB dump file needed for MASTER <-> SLAVE synchronization: %s", 
+            (nwritten == -1) ? strerror(errno) : "short write");
         goto error;
     }
     server.repl_transfer_read += nread;
@@ -1328,7 +1331,8 @@ char *sendSynchronousCommand(int flags, int fd, ...) {
             cmd = sdscat(cmd,arg);
         }
         cmd = sdscatlen(cmd,"\r\n",2);
-
+        va_end(ap);
+        
         /* Transfer command to the server. */
         if (syncWrite(fd,cmd,sdslen(cmd),server.repl_syncio_timeout*1000)
             == -1)
@@ -1338,7 +1342,6 @@ char *sendSynchronousCommand(int flags, int fd, ...) {
                     strerror(errno));
         }
         sdsfree(cmd);
-        va_end(ap);
     }
 
     /* Read the reply from the server. */
@@ -1530,6 +1533,11 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
         /* Setup the replication to continue. */
         sdsfree(reply);
         replicationResurrectCachedMaster(fd);
+
+        /* If this instance was restarted and we read the metadata to
+         * PSYNC from the persistence file, our replication backlog could
+         * be still not initialized. Create it. */
+        if (server.repl_backlog == NULL) createReplicationBacklog();
         return PSYNC_CONTINUE;
     }
 
@@ -1963,6 +1971,12 @@ void replicationUnsetMaster(void) {
      * with PSYNC version 2, there is no need for full resync after a
      * master switch. */
     server.slaveseldb = -1;
+
+    /* Once we turn from slave to master, we consider the starting time without
+     * slaves (that is used to count the replication backlog time to live) as
+     * starting from now. Otherwise the backlog will be freed after a
+     * failover if slaves do not connect immediately. */
+    server.repl_no_slaves_since = server.unixtime;
 }
 
 /* This function is called when the slave lose the connection with the
@@ -2118,6 +2132,18 @@ void replicationCacheMaster(client *c) {
     /* Unlink the client from the server structures. */
     unlinkClient(c);
 
+    /* Reset the master client so that's ready to accept new commands:
+     * we want to discard te non processed query buffers and non processed
+     * offsets, including pending transactions, already populated arguments,
+     * pending outputs to the master. */
+    sdsclear(server.master->querybuf);
+    sdsclear(server.master->pending_querybuf);
+    server.master->read_reploff = server.master->reploff;
+    if (c->flags & CLIENT_MULTI) discardTransaction(c);
+    listEmpty(c->reply);
+    c->bufpos = 0;
+    resetClient(c);
+
     /* Save the master. Server.master will be set to null later by
      * replicationHandleMasterDisconnection(). */
     server.cached_master = server.master;
@@ -2186,7 +2212,7 @@ void replicationResurrectCachedMaster(int newfd) {
     server.repl_state = REPL_STATE_CONNECTED;
 
     /* Re-add to the list of clients. */
-    listAddNodeTail(server.clients,server.master);
+    linkClient(server.master);
     if (aeCreateFileEvent(server.el, newfd, AE_READABLE,
                           readQueryFromClient, server.master)) {
         serverLog(LL_WARNING,"Error resurrecting the cached master, impossible to add the readable handler: %s", strerror(errno));
@@ -2594,6 +2620,23 @@ void replicationCron(void) {
         time_t idle = server.unixtime - server.repl_no_slaves_since;
 
         if (idle > server.repl_backlog_time_limit) {
+            /* When we free the backlog, we always use a new
+             * replication ID and clear the ID2. This is needed
+             * because when there is no backlog, the master_repl_offset
+             * is not updated, but we would still retain our replication
+             * ID, leading to the following problem:
+             *
+             * 1. We are a master instance.
+             * 2. Our slave is promoted to master. It's repl-id-2 will
+             *    be the same as our repl-id.
+             * 3. We, yet as master, receive some updates, that will not
+             *    increment the master_repl_offset.
+             * 4. Later we are turned into a slave, connecto to the new
+             *    master that will accept our PSYNC request by second
+             *    replication ID, but there will be data inconsistency
+             *    because we received writes. */
+            changeReplicationId();
+            clearReplicationId2();
             freeReplicationBacklog();
             serverLog(LL_NOTICE,
                 "Replication backlog freed after %d seconds "

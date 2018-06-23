@@ -30,6 +30,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 /* This function provide us access to the original libc free(). This is useful
  * for instance to free results obtained by backtrace_symbols(). We need
@@ -73,25 +74,16 @@ void zlibc_free(void *ptr) {
 #define update_zmalloc_stat_alloc(__n) do { \
     size_t _n = (__n); \
     if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
-    if (zmalloc_thread_safe) { \
-        atomicIncr(used_memory,__n,used_memory_mutex); \
-    } else { \
-        used_memory += _n; \
-    } \
+    atomicIncr(used_memory,__n); \
 } while(0)
 
 #define update_zmalloc_stat_free(__n) do { \
     size_t _n = (__n); \
     if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
-    if (zmalloc_thread_safe) { \
-        atomicDecr(used_memory,__n,used_memory_mutex); \
-    } else { \
-        used_memory -= _n; \
-    } \
+    atomicDecr(used_memory,__n); \
 } while(0)
 
 static size_t used_memory = 0;
-static int zmalloc_thread_safe = 0;
 pthread_mutex_t used_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void zmalloc_default_oom(size_t size) {
@@ -173,7 +165,7 @@ void *zrealloc(void *ptr, size_t size) {
 
     *((size_t*)newptr) = size;
     update_zmalloc_stat_free(oldsize);
-    update_zmalloc_stat_alloc(size);
+    update_zmalloc_stat_alloc(size+PREFIX_SIZE);
     return (char*)newptr+PREFIX_SIZE;
 #endif
 }
@@ -220,17 +212,8 @@ char *zstrdup(const char *s) {
 
 size_t zmalloc_used_memory(void) {
     size_t um;
-
-    if (zmalloc_thread_safe) {
-        atomicGet(used_memory,um,used_memory_mutex);
-    } else {
-        um = used_memory;
-    }
+    atomicGet(used_memory,um);
     return um;
-}
-
-void zmalloc_enable_thread_safeness(void) {
-    zmalloc_thread_safe = 1;
 }
 
 void zmalloc_set_oom_handler(void (*oom_handler)(size_t)) {
@@ -315,10 +298,36 @@ size_t zmalloc_get_rss(void) {
 }
 #endif
 
-/* Fragmentation = RSS / allocated-bytes */
-float zmalloc_get_fragmentation_ratio(size_t rss) {
-    return (float)rss/zmalloc_used_memory();
+#if defined(USE_JEMALLOC)
+int zmalloc_get_allocator_info(size_t *allocated,
+                               size_t *active,
+                               size_t *resident) {
+    uint64_t epoch = 1;
+    size_t sz;
+    *allocated = *resident = *active = 0;
+    /* Update the statistics cached by mallctl. */
+    sz = sizeof(epoch);
+    je_mallctl("epoch", &epoch, &sz, &epoch, sz);
+    sz = sizeof(size_t);
+    /* Unlike RSS, this does not include RSS from shared libraries and other non
+     * heap mappings. */
+    je_mallctl("stats.resident", resident, &sz, NULL, 0);
+    /* Unlike resident, this doesn't not include the pages jemalloc reserves
+     * for re-use (purge will clean that). */
+    je_mallctl("stats.active", active, &sz, NULL, 0);
+    /* Unlike zmalloc_used_memory, this matches the stats.resident by taking
+     * into account all allocations done by this process (not only zmalloc). */
+    je_mallctl("stats.allocated", allocated, &sz, NULL, 0);
+    return 1;
 }
+#else
+int zmalloc_get_allocator_info(size_t *allocated,
+                               size_t *active,
+                               size_t *resident) {
+    *allocated = *resident = *active = 0;
+    return 1;
+}
+#endif
 
 /* Get the sum of the specified field (converted form kb to bytes) in
  * /proc/self/smaps. The field must be specified with trailing ":" as it
@@ -410,7 +419,7 @@ size_t zmalloc_get_memory_size(void) {
     mib[0] = CTL_HW;
 #if defined(HW_REALMEM)
     mib[1] = HW_REALMEM;        /* FreeBSD. ----------------- */
-#elif defined(HW_PYSMEM)
+#elif defined(HW_PHYSMEM)
     mib[1] = HW_PHYSMEM;        /* Others. ------------------ */
 #endif
     unsigned int size = 0;      /* 32-bit */
@@ -418,8 +427,9 @@ size_t zmalloc_get_memory_size(void) {
     if (sysctl(mib, 2, &size, &len, NULL, 0) == 0)
         return (size_t)size;
     return 0L;          /* Failed? */
-#endif /* sysctl and sysconf variants */
-
+#else
+    return 0L;          /* Unknown method to get the data. */
+#endif
 #else
     return 0L;          /* Unknown OS. */
 #endif
