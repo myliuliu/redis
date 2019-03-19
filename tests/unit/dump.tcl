@@ -33,7 +33,7 @@ start_server {tags {"dump"}} {
         set now [clock milliseconds]
         r restore foo [expr $now+3000] $encoded absttl
         set ttl [r pttl foo]
-        assert {$ttl >= 2998 && $ttl <= 3000}
+        assert {$ttl >= 2900 && $ttl <= 3100}
         r get foo
     } {bar}
     
@@ -44,7 +44,7 @@ start_server {tags {"dump"}} {
         r config set maxmemory-policy allkeys-lru
         r restore foo 0 $encoded idletime 1000
         set idle [r object idletime foo]
-        assert {$idle >= 1000 && $idle <= 1002}
+        assert {$idle >= 1000 && $idle <= 1010}
         r get foo
     } {bar}
     
@@ -279,7 +279,7 @@ start_server {tags {"dump"}} {
         set e
     } {*empty string*}
 
-    test {MIGRATE with mutliple keys migrate just existing ones} {
+    test {MIGRATE with multiple keys migrate just existing ones} {
         set first [srv 0 client]
         r set key1 "v1"
         r set key2 "v2"
