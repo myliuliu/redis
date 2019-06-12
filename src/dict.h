@@ -43,7 +43,7 @@
 
 /* Unused arguments generate annoying warnings... */
 #define DICT_NOTUSED(V) ((void) V)
-
+//哈希表节点结构
 typedef struct dictEntry {
     void *key;
     union {
@@ -52,6 +52,7 @@ typedef struct dictEntry {
         int64_t s64;
         double d;
     } v;
+    //指向另一个哈希表节点的指针，这个指针可以将多个哈希值相同的键值对连接在一起，以此来解决键冲突问题
     struct dictEntry *next;
 } dictEntry;
 
@@ -66,17 +67,26 @@ typedef struct dictType {
 
 /* This is our hash table structure. Every dictionary has two of this as we
  * implement incremental rehashing, for the old to the new table. */
-typedef struct dictht {
-    dictEntry **table;
+typedef struct dictht {//哈希表结构定义
+    dictEntry **table;//哈希表数组
     unsigned long size;
-    unsigned long sizemask;
-    unsigned long used;
+    unsigned long sizemask;//哈希表大小掩码，用于计算索引值，总是等于size-1
+    unsigned long used;//该哈希表已有节点的数量
 } dictht;
-
+/**Redis字典结构
+ * type属性和privdata属性是针对不同类型的键值对，为创建多态字典而设置的：
+ *  type属性是一个指向dictType结构的指针，每个dictType结构保存了一簇用于操作特定类型键值对的函数，
+ *      Redis会为用途不同的字典设置不同的类型特定函数。
+ *  privdata属性则保存了需要传递给那些类型特定函数的可选参数。
+ *  ht属性是一个包含两个项的数组，数组中的每个项都是一个dictht哈希表，一般情况下字典只使用ht[0]哈希表，
+ *      ht[1]哈希表只会在对ht[0]哈希表进行rehash时使用。除了ht[1]之外，另一个和rehash有关的属性就是rehashidx，
+ *      它记录了rehash目前的进度，如果目前没有rehash有关的属性那么它的值为-1.
+ * */
 typedef struct dict {
-    dictType *type;
-    void *privdata;
-    dictht ht[2];
+    dictType *type;//类型特定函数
+    void *privdata;//私有数据
+    dictht ht[2];//哈希表
+    //rehash索引，当rehash不在进行时，值为-1
     long rehashidx; /* rehashing not in progress if rehashidx == -1 */
     unsigned long iterators; /* number of iterators currently running */
 } dict;

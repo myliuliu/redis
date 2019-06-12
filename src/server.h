@@ -595,13 +595,13 @@ typedef struct RedisModuleDigest {
 
 #define OBJ_SHARED_REFCOUNT INT_MAX
 typedef struct redisObject {
-    unsigned type:4;
-    unsigned encoding:4;
+    unsigned type:4;//类型
+    unsigned encoding:4;//编码
     unsigned lru:LRU_BITS; /* LRU time (relative to global lru_clock) or
                             * LFU data (least significant 8 bits frequency
                             * and most significant 16 bits access time). */
     int refcount;
-    void *ptr;
+    void *ptr;//指向底层实现数据结构的指针
 } robj;
 
 /* Macro used to initialize a Redis object allocated on the stack.
@@ -778,19 +778,32 @@ struct sharedObjectsStruct {
 
 /* ZSETs use a specialized version of Skiplists */
 typedef struct zskiplistNode {
-    sds ele;
-    double score;
-    struct zskiplistNode *backward;
+    sds ele;//成员对象，唯一值
+    double score;//在跳跃表中，节点按各自所保存的分值从小到大排列。
+    struct zskiplistNode *backward;//后退指针：它指向位于当前节点的前一个节点，后退指针在程序从表尾向表头遍历时使用。
+    /**
+     * level数组可以包含多个元素，每个元素都包含一个指向其他节点的指针，程序可以通过这些层来加快访问其他节点的速度，一般来说，
+     * 层的数量越多，访问其他节点的速度就越快。
+     * 每次创建一个新跳跃表节点时候，程序都根据幂次定律（越大的数出现的概率越小）随机生成一个介于1和32之间的值作为level数组的
+     * 大小，这个大小就是层的“高度”。
+     * 
+     * 遍历操作只是使用前进指针就可以完成了，跨度实际上时用来计算排位的：在查找某个节点的过程中，
+     * 将沿途访问过的所有层的跨度累计起来，得到的结果就是目标节点在跳跃表中的排位。
+    */
     struct zskiplistLevel {
-        struct zskiplistNode *forward;
-        unsigned long span;
+        struct zskiplistNode *forward;//前进指针,用于访问位于表尾方向的其他节点
+        /**
+         * 1.两个层之间的跨度越大，它们相距得就越远；
+         * 2.指向NULL的所有前进指针的跨度都为0，因为他们没有连向任何节点。
+        */
+        unsigned long span;//跨度,记录了前进指针所指向节点和当前节点的距离
     } level[];
 } zskiplistNode;
 
 typedef struct zskiplist {
-    struct zskiplistNode *header, *tail;
-    unsigned long length;
-    int level;
+    struct zskiplistNode *header, *tail;//跳跃表的表头表尾节点
+    unsigned long length;//跳跃表的长度，也就是跳跃表目前包含节点的数量（表头节点不计算在内）
+    int level;//记录目前跳跃表内层数最大的那个节点的层数（表头节点的层数不计算在内）
 } zskiplist;
 
 typedef struct zset {
@@ -1021,6 +1034,7 @@ struct redisServer {
     int active_defrag_cycle_max;       /* maximal effort for defrag in CPU percentage */
     unsigned long active_defrag_max_scan_fields; /* maximum number of fields of set/hash/zset/list to process from within the main dict scan */
     size_t client_max_querybuf_len; /* Limit for client query buffer length */
+    //dbnum的值由服务器配置的database选项决定，默认情况下，该选项的值为16
     int dbnum;                      /* Total number of configured DBs */
     int supervised;                 /* 1 if supervised, 0 otherwise. */
     int supervised_mode;            /* See SUPERVISED_* */

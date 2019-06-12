@@ -60,17 +60,21 @@ typedef struct list {
 #define listPrevNode(n) ((n)->prev)
 #define listNextNode(n) ((n)->next)
 #define listNodeValue(n) ((n)->value)
-
+//将给定的函数设置为链表的节点值复制函数
 #define listSetDupMethod(l,m) ((l)->dup = (m))
+//将给定的函数设置为链表的节点值释放函数
 #define listSetFreeMethod(l,m) ((l)->free = (m))
+//将给定的函数设置为链表的节点值对比函数
 #define listSetMatchMethod(l,m) ((l)->match = (m))
-
+//返回链表当前正在使用的节点值复制函数
 #define listGetDupMethod(l) ((l)->dup)
+//返回链表当前正在使用的节点值释放函数
 #define listGetFree(l) ((l)->free)
+//返回链表当前正在使用的节点值对比函数
 #define listGetMatchMethod(l) ((l)->match)
 
 /* Prototypes */
-list *listCreate(void);
+list *listCreate(void);//创建一个不包含任何节点的新链表
 void listRelease(list *list);
 void listEmpty(list *list);
 list *listAddNodeHead(list *list, void *value);

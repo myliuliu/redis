@@ -201,6 +201,16 @@ static void intsetMoveTail(intset *is, uint32_t from, uint32_t to) {
 }
 
 /* Insert an integer in the intset */
+/**
+ * 每当我们要将一个新元素添加到整数集合里，并且新元素的类型比整数集合现有所有元素的类型都要长时，整数集合需要
+ * 先进行升级，然后才能将新元素添加到整数集合里。
+ * 升级整数集合并添加新元素共分为三步进行：
+ *  1.根据新元素的类型，扩展整数集合底层数组的空间大小，并为新元素分配空间；
+ *  2.将底层数组现有的所有元素都转换成与新元素相同的类型，并将类型转换后的元素放置到正确位上，而且在放置元素过程中，需要继续维持底层数组的有序性不变；
+ *  3.将新元素添加到底层数组里。
+ * 
+ * 整数集合不支持降级操作，一旦对数组进行了升级编码就会一直保持升级后的状态。
+*/
 intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
     uint8_t valenc = _intsetValueEncoding(value);
     uint32_t pos;
